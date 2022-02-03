@@ -2,6 +2,8 @@
 #https://docs.microsoft.com/en-us/powershell/scripting/learn/ps101/09-functions?view=powershell-7.2
 #https://superuser.com/questions/1622534/specifying-log-file-for-a-scheduled-powershell-script
 
+#need to create a config file called C:\jobs\config.txt
+
 #get size for before and after
  function Get-Size-Dirs {
     param (
@@ -33,17 +35,19 @@ Get-Volume -DriveLetter C, D | Select-Object $props | Format-Table
 
 }
 
+
 Get-Size-Dirs
 
-#anything older than 15 days
+#anything older than 15 days will be deleted
 $limit = (Get-Date).AddDays(-15)
-$iis_dir = "C:\inetpub\logs\LogFiles\W3SVC1"
-$apr_dir = "D:\Temp\AprisoLogs"
-$filePathList =$iis_dir,$apr_dir
-#$filePathList =$iis_dir
+$configPathFile = "C:\jobs\config.txt"
+#read the input file for all the directories we need to clean 
+$filePathList = Get-Content -Path @($configPathFile)
 
 Foreach ($path in $filePathList)
 {
+write-host "cleaning ..."
+write-host $path
 # Delete files older than the $limit.
 Get-ChildItem -Path $path -Recurse -Force | Where-Object { !$_.PSIsContainer -and $_.CreationTime -lt $limit } | Remove-Item -Force
 
