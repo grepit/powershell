@@ -2,7 +2,13 @@
 #https://docs.microsoft.com/en-us/powershell/scripting/learn/ps101/09-functions?view=powershell-7.2
 #https://superuser.com/questions/1622534/specifying-log-file-for-a-scheduled-powershell-script
 
-#need to create a config file called C:\jobs\config.txt
+#   Description:
+#   This script will clean up any log files that are older than 15 days
+#   The logs files are defined via a config file and the config file is expected to be in C:\jobs\config.txt 
+#   Example of Config file:
+#   C:\inetpub\logs\LogFiles\W3SVC1
+#   D:\Temp\AprisoLogs
+#   Also if there are any empty directories those will be removed as well.
 
 #get size for before and after
  function Get-Size-Dirs {
