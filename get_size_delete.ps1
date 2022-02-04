@@ -37,7 +37,7 @@ $props = @(
     }
 )
 
-Get-Volume -DriveLetter C, D | Select-Object $props | Format-Table
+Get-Volume  | Select-Object $props | Format-Table
 
 }
 
