@@ -1,0 +1,3 @@
+Invoke-WebRequest https://aka.ms/ssmsfullsetup -OutFile SSMS-Setup-ENU.exe
+
+Start-Process SSMS-Setup-ENU.exe /Install /Quiet /NoRestart
