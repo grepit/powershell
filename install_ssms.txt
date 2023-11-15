@@ -1,3 +1,5 @@
 Invoke-WebRequest https://aka.ms/ssmsfullsetup -OutFile SSMS-Setup-ENU.exe
 
 Start-Process SSMS-Setup-ENU.exe /Install 
+## if above does not work you can try this:
+Enable-WindowsOptionalFeature -Online -FeatureName "TelnetClient"
