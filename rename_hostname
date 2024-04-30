@@ -1,0 +1,2 @@
+#windows may warn you that netbios will have shortner and that's fine it's because of compatibility 
+Rename-Computer -NewName "some_host_name" -Restart
