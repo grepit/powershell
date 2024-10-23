@@ -6,3 +6,6 @@ Enable-WindowsOptionalFeature -Online -FeatureName "TelnetClient"
 dism /online /Enable-Feature /FeatureName:TelnetClient
 # yoo can also use this instead of telnet
 Test-NetConnection some_ip_here -Port 22
+
+# for linux netcat
+nc -zv some_ip_here 80
