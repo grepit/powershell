@@ -1,0 +1,318 @@
+## step 1
+.\runit.ps1 -InstanceId "i-01443b4859e997645" -Region "us-east-2"
+
+
+
+
+Invoke-WebRequest -Uri "https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi" -OutFile "$env:TEMP\amazon-cloudwatch-agent.msi"
+Start-Process msiexec.exe -ArgumentList "/i $env:TEMP\amazon-cloudwatch-agent.msi /quiet" -Wait
+
+# Step 2: Create configuration file
+Remove-Item "C:\ProgramData\Amazon\AmazonCloudWatchAgent\Configs\file_amazon-cloudwatch-agent.json.tmp" -ErrorAction SilentlyContinue
+
+# Recreate the config with proper encoding (UTF8 without BOM)
+$configContent = @'
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "CWAgent"
+  },
+  "metrics": {
+    "namespace": "CWAgent",
+    "metrics_collected": {
+      "LogicalDisk": {
+        "measurement": [
+          "% Free Space"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "*"
+        ]
+      },
+      "disk": {
+        "measurement": [
+          "used_percent"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "*"
+        ],
+        "drop_device": false,
+        "ignore_file_system_types": [
+          "tmpfs", "devtmpfs", "devfs", "iso9660", "overlay", "aufs", "squashfs"
+        ]
+      },
+      "Memory": {
+        "measurement": [
+          "% Committed Bytes In Use"
+        ],
+        "metrics_collection_interval": 60
+      },
+      "Network Interface": {
+        "measurement": [
+          "Bytes Received/sec",
+          "Bytes Sent/sec",
+          "Packets Received/sec",
+          "Packets Sent/sec"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "*"
+        ]
+      },
+      "PhysicalDisk": {
+        "measurement": [
+          "% Disk Time",
+          "Disk Read Bytes/sec",
+          "Disk Write Bytes/sec",
+          "Disk Reads/sec",
+          "Disk Writes/sec"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "*"
+        ]
+      },
+      "Processor": {
+        "measurement": [
+          "% User Time",
+          "% Idle Time",
+          "% Interrupt Time"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "*"
+        ]
+      },
+      "System": {
+        "measurement": [
+          "Context Switches/sec",
+          "System Calls/sec",
+          "Processor Queue Length"
+        ],
+        "metrics_collection_interval": 60
+      },
+      "TCPv4": {
+        "measurement": [
+          "Connections Established"
+        ],
+        "metrics_collection_interval": 60
+      },
+      "TCPv6": {
+        "measurement": [
+          "Connections Established"
+        ],
+        "metrics_collection_interval": 60
+      }
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "windows_events": {
+        "collect_list": [
+          {
+            "event_name": "System",
+            "event_levels": [
+              "INFORMATION",
+              "WARNING",
+              "ERROR",
+              "CRITICAL"
+            ],
+            "log_group_name": "windows-system-events",
+            "log_stream_name": "{instance_id}/system",
+            "event_format": "xml"
+          },
+          {
+            "event_name": "Application",
+            "event_levels": [
+              "INFORMATION", 
+              "WARNING",
+              "ERROR",
+              "CRITICAL"
+            ],
+            "log_group_name": "windows-application-events",
+            "log_stream_name": "{instance_id}/application",
+            "event_format": "xml"
+          },
+          {
+            "event_name": "Security",
+            "event_levels": [
+              "INFORMATION",
+              "WARNING", 
+              "ERROR",
+              "CRITICAL"
+            ],
+            "log_group_name": "windows-security-events",
+            "log_stream_name": "{instance_id}/security",
+            "event_format": "xml"
+          }
+        ]
+      },
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "C:\\ProgramData\\Amazon\\AmazonCloudWatchAgent\\Logs\\amazon-cloudwatch-agent.log",
+            "log_group_name": "cloudwatch-agent-logs",
+            "log_stream_name": "{instance_id}/cloudwatch-agent",
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "C:\\ProgramData\\Amazon\\SSM\\Logs\\amazon-ssm-agent.log",
+            "log_group_name": "ssm-logs",
+            "log_stream_name": "{instance_id}/ssm-agent",
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  }
+}
+
+'@ 
+Set-Content -Path "C:\ProgramData\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent.json" -Value $config -Encoding UTF8
+
+
+#step 3
+# Write with UTF8 no BOM
+[System.IO.File]::WriteAllText("C:\ProgramData\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent.json", $configContent, (New-Object System.Text.UTF8Encoding $false))
+
+# Apply configuration
+& "C:\Program Files\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent-ctl.ps1" -a fetch-config -m ec2 -s -c file:"C:\ProgramData\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent.json"
+
+
+
+# Step 4: Restart and check service
+Restart-Service AmazonCloudWatchAgent
+Get-Service AmazonCloudWatchAgent
+Set-Service AmazonCloudWatchAgent -StartupType Automatic
+Get-Service AmazonCloudWatchAgent
+
+#step 5
+Get-Content "C:\ProgramData\Amazon\AmazonCloudWatchAgent\Logs\amazon-cloudwatch-agent.log" -Tail 50
+Get-Content "C:\ProgramData\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent.log" -Tail 50
+
+#step 6
+run this powershell script
+
+
+# CloudWatch Disk Metrics Script - Fixed BOM Issue
+# This version avoids the UTF-8 BOM that was breaking AWS CLI JSON parsing
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$InstanceId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$Region,
+    
+    [string]$Drive = "C:"
+)
+
+Write-Host "Instance ID: $InstanceId"
+Write-Host "Region: $Region"
+Write-Host "Monitoring Drive: $Drive"
+
+# Get disk usage for specified drive
+try {
+    $disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='$Drive'" -ErrorAction Stop
+    
+    if (-not $disk) {
+        Write-Error "Drive $Drive not found"
+        exit 1
+    }
+    
+    $totalSize = $disk.Size
+    $freeSpace = $disk.FreeSpace
+    $usedSpace = $totalSize - $freeSpace
+    $usedPercent = [math]::Round(($usedSpace / $totalSize) * 100, 2)
+    
+    Write-Host "Drive $Drive Usage: $usedPercent% ($([math]::Round($usedSpace/1GB, 2)) GB used of $([math]::Round($totalSize/1GB, 2)) GB total)"
+    
+    # Send metric with EXACTLY the dimensions your alarm expects
+    Write-Host "Sending metric with InstanceId dimension (what your alarm expects)..."
+    
+    # Create JSON content (avoid UTF-8 BOM by using ASCII encoding)
+    $jsonContent = @"
+[
+  {
+    "MetricName": "disk_used_percent",
+    "Value": $usedPercent,
+    "Unit": "Percent",
+    "Timestamp": "$((Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"))",
+    "Dimensions": [
+      {
+        "Name": "InstanceId",
+        "Value": "$InstanceId"
+      }
+    ]
+  }
+]
+"@
+    
+    # Write to file using ASCII encoding (no BOM)
+    $jsonFile = "disk-metric-clean.json"
+    $jsonContent | Out-File -FilePath $jsonFile -Encoding ASCII -NoNewline
+    
+    Write-Host "Created clean JSON file (no BOM):"
+    Write-Host $jsonContent
+    Write-Host ""
+    
+    # Verify file contents
+    Write-Host "Verifying file contents:"
+    $fileContent = Get-Content $jsonFile -Raw
+    Write-Host "First 10 characters: '$($fileContent.Substring(0, [Math]::Min(10, $fileContent.Length)))'"
+    Write-Host ""
+    
+    # Send using file method
+    Write-Host "Sending metric to CloudWatch..."
+    $result = & aws cloudwatch put-metric-data --region $Region --namespace "CWAgent" --metric-data "file://$jsonFile" 2>&1
+    $exitCode = $LASTEXITCODE
+    
+    Write-Host "AWS CLI Exit Code: $exitCode"
+    if ($result) {
+        Write-Host "AWS CLI Output: $result"
+    }
+    
+    if ($exitCode -eq 0) {
+        Write-Host "✅ SUCCESS! Sent disk_used_percent metric with InstanceId dimension"
+        Write-Host "Metric: disk_used_percent = $usedPercent%"
+        Write-Host "Dimension: InstanceId = $InstanceId"
+        Write-Host "Namespace: CWAgent"
+        Write-Host ""
+        Write-Host "🎯 This matches EXACTLY what your alarm expects!"
+        Write-Host "Your alarm 'DiskUtilization-$InstanceId-AutoDiscovered' should update within 15 minutes!"
+    } else {
+        Write-Host "❌ File method failed. Trying alternative approach..."
+        
+        # Alternative: Use here-string approach with AWS CLI
+        Write-Host "Trying direct AWS CLI with simplified JSON..."
+        
+        $altResult = & aws cloudwatch put-metric-data --region $Region --namespace "CWAgent" --metric-data "MetricName=disk_used_percent,Value=$usedPercent,Unit=Percent,Dimensions=[{Name=InstanceId,Value=$InstanceId}]" 2>&1
+        $altExitCode = $LASTEXITCODE
+        
+        Write-Host "Alternative method exit code: $altExitCode"
+        if ($altResult) {
+            Write-Host "Alternative method output: $altResult"
+        }
+        
+        if ($altExitCode -eq 0) {
+            Write-Host "✅ SUCCESS with alternative method!"
+        } else {
+            Write-Error "❌ Both methods failed."
+            exit 1
+        }
+    }
+    
+    # Clean up
+    Remove-Item $jsonFile -ErrorAction SilentlyContinue
+    
+} catch {
+    Write-Error "❌ Error getting disk information: $($_.Exception.Message)"
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Script completed successfully!"
+Write-Host "Monitor your alarm at: https://console.aws.amazon.com/cloudwatch/home?region=$Region#alarmsV2:alarm/DiskUtilization-$InstanceId-AutoDiscovered"
+
+
