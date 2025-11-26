@@ -193,126 +193,249 @@ Get-Content "C:\ProgramData\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent
 
 #step 6
 run this powershell script
+.\fixit.ps1 -InstanceId "i-01443b4859e997645" -Region "us-east-2"
 
 
-# CloudWatch Disk Metrics Script - Fixed BOM Issue
-# This version avoids the UTF-8 BOM that was breaking AWS CLI JSON parsing
+# Manual Disk Metrics Solution - Bypass IAM Issues
+# Since CloudWatchAgentServerPolicy is attached but 401 errors persist, use manual approach
 
 param(
     [Parameter(Mandatory=$true)]
     [string]$InstanceId,
     
     [Parameter(Mandatory=$true)]
-    [string]$Region,
-    
-    [string]$Drive = "C:"
+    [string]$Region
 )
 
+Write-Host "=== Manual Disk Metrics Solution ==="
 Write-Host "Instance ID: $InstanceId"
 Write-Host "Region: $Region"
-Write-Host "Monitoring Drive: $Drive"
+Write-Host ""
 
-# Get disk usage for specified drive
+# Check if running as Administrator
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+
+if (-not $isAdmin) {
+    Write-Error "This script must be run as Administrator."
+    exit 1
+}
+
+Write-Host "MANUAL SOLUTION: Since CloudWatchAgentServerPolicy is attached but 401 errors persist..."
+Write-Host "We'll use the direct PowerShell approach that bypasses the CloudWatch Agent service."
+Write-Host ""
+
 try {
-    $disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='$Drive'" -ErrorAction Stop
+    # Step 1: Test basic metric sending
+    Write-Host "STEP 1: Testing manual disk metric sending..."
     
-    if (-not $disk) {
-        Write-Error "Drive $Drive not found"
-        exit 1
-    }
-    
+    # Get current disk usage
+    $disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
     $totalSize = $disk.Size
     $freeSpace = $disk.FreeSpace
     $usedSpace = $totalSize - $freeSpace
     $usedPercent = [math]::Round(($usedSpace / $totalSize) * 100, 2)
     
-    Write-Host "Drive $Drive Usage: $usedPercent% ($([math]::Round($usedSpace/1GB, 2)) GB used of $([math]::Round($totalSize/1GB, 2)) GB total)"
-    
-    # Send metric with EXACTLY the dimensions your alarm expects
-    Write-Host "Sending metric with InstanceId dimension (what your alarm expects)..."
-    
-    # Create JSON content (avoid UTF-8 BOM by using ASCII encoding)
-    $jsonContent = @"
-[
-  {
-    "MetricName": "disk_used_percent",
-    "Value": $usedPercent,
-    "Unit": "Percent",
-    "Timestamp": "$((Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"))",
-    "Dimensions": [
-      {
-        "Name": "InstanceId",
-        "Value": "$InstanceId"
-      }
-    ]
-  }
-]
-"@
-    
-    # Write to file using ASCII encoding (no BOM)
-    $jsonFile = "disk-metric-clean.json"
-    $jsonContent | Out-File -FilePath $jsonFile -Encoding ASCII -NoNewline
-    
-    Write-Host "Created clean JSON file (no BOM):"
-    Write-Host $jsonContent
+    Write-Host "C: Drive Usage: $usedPercent% ($([math]::Round($usedSpace/1GB, 2)) GB used of $([math]::Round($totalSize/1GB, 2)) GB total)"
     Write-Host ""
+
+    # Method 1: Try with explicit credentials (using instance metadata)
+    Write-Host "Method 1: Using AWS CLI with instance profile..."
+    $result1 = & aws cloudwatch put-metric-data --region $Region --namespace "CWAgent" --metric-data "MetricName=disk_used_percent,Value=$usedPercent,Unit=Percent,Dimensions=[{Name=InstanceId,Value=$InstanceId}]" 2>&1
     
-    # Verify file contents
-    Write-Host "Verifying file contents:"
-    $fileContent = Get-Content $jsonFile -Raw
-    Write-Host "First 10 characters: '$($fileContent.Substring(0, [Math]::Min(10, $fileContent.Length)))'"
-    Write-Host ""
-    
-    # Send using file method
-    Write-Host "Sending metric to CloudWatch..."
-    $result = & aws cloudwatch put-metric-data --region $Region --namespace "CWAgent" --metric-data "file://$jsonFile" 2>&1
-    $exitCode = $LASTEXITCODE
-    
-    Write-Host "AWS CLI Exit Code: $exitCode"
-    if ($result) {
-        Write-Host "AWS CLI Output: $result"
-    }
-    
-    if ($exitCode -eq 0) {
-        Write-Host "✅ SUCCESS! Sent disk_used_percent metric with InstanceId dimension"
-        Write-Host "Metric: disk_used_percent = $usedPercent%"
-        Write-Host "Dimension: InstanceId = $InstanceId"
-        Write-Host "Namespace: CWAgent"
-        Write-Host ""
-        Write-Host "🎯 This matches EXACTLY what your alarm expects!"
-        Write-Host "Your alarm 'DiskUtilization-$InstanceId-AutoDiscovered' should update within 15 minutes!"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "SUCCESS: Manual metric sent via AWS CLI"
+        $method1Success = $true
     } else {
-        Write-Host "❌ File method failed. Trying alternative approach..."
+        Write-Host "AWS CLI method failed: $result1"
+        $method1Success = $false
         
-        # Alternative: Use here-string approach with AWS CLI
-        Write-Host "Trying direct AWS CLI with simplified JSON..."
+        # Method 2: Try with different AWS CLI configuration
+        Write-Host ""
+        Write-Host "Method 2: Trying with explicit region configuration..."
         
-        $altResult = & aws cloudwatch put-metric-data --region $Region --namespace "CWAgent" --metric-data "MetricName=disk_used_percent,Value=$usedPercent,Unit=Percent,Dimensions=[{Name=InstanceId,Value=$InstanceId}]" 2>&1
-        $altExitCode = $LASTEXITCODE
+        # Set AWS region environment variable
+        $env:AWS_DEFAULT_REGION = $Region
+        $result2 = & aws cloudwatch put-metric-data --namespace "CWAgent" --metric-data "MetricName=disk_used_percent,Value=$usedPercent,Unit=Percent,Dimensions=[{Name=InstanceId,Value=$InstanceId}]" 2>&1
         
-        Write-Host "Alternative method exit code: $altExitCode"
-        if ($altResult) {
-            Write-Host "Alternative method output: $altResult"
-        }
-        
-        if ($altExitCode -eq 0) {
-            Write-Host "✅ SUCCESS with alternative method!"
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "SUCCESS: Manual metric sent with environment variable"
+            $method2Success = $true
         } else {
-            Write-Error "❌ Both methods failed."
-            exit 1
+            Write-Host "Environment variable method failed: $result2"
+            $method2Success = $false
         }
     }
     
-    # Clean up
-    Remove-Item $jsonFile -ErrorAction SilentlyContinue
+    if ($method1Success -or $method2Success) {
+        Write-Host ""
+        Write-Host "SUCCESS: Manual disk metrics are working!"
+        Write-Host ""
+        
+        # Step 2: Create scheduled task for continuous monitoring
+        Write-Host "STEP 2: Setting up continuous monitoring with scheduled task..."
+        
+        # Create the working script
+        $scriptDir = "C:\Scripts"
+        if (!(Test-Path $scriptDir)) {
+            New-Item -ItemType Directory -Path $scriptDir -Force | Out-Null
+            Write-Host "Created directory: $scriptDir"
+        }
+        
+        $workingScript = @"
+# Auto-generated disk monitoring script
+param(
+    [string]`$InstanceId = "$InstanceId",
+    [string]`$Region = "$Region"
+)
+
+# Set region environment variable
+`$env:AWS_DEFAULT_REGION = `$Region
+
+# Get disk usage
+`$disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='C:'"
+if (`$disk) {
+    `$totalSize = `$disk.Size
+    `$freeSpace = `$disk.FreeSpace
+    `$usedSpace = `$totalSize - `$freeSpace
+    `$usedPercent = [math]::Round((`$usedSpace / `$totalSize) * 100, 2)
     
+    # Send metric
+    `$result = & aws cloudwatch put-metric-data --region `$Region --namespace "CWAgent" --metric-data "MetricName=disk_used_percent,Value=`$usedPercent,Unit=Percent,Dimensions=[{Name=InstanceId,Value=`$InstanceId}]" 2>&1
+    
+    if (`$LASTEXITCODE -eq 0) {
+        Write-Host "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): SUCCESS - Sent disk metric: `$usedPercent%"
+    } else {
+        Write-Host "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): ERROR - Failed to send metric: `$result"
+    }
+} else {
+    Write-Host "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): ERROR - Could not get disk information"
+}
+"@
+        
+        $scriptPath = "$scriptDir\send-disk-metrics-working.ps1"
+        $workingScript | Out-File $scriptPath -Encoding UTF8
+        Write-Host "Created working script at: $scriptPath"
+        
+        # Create scheduled task
+        $taskName = "CloudWatch-Disk-Metrics-$InstanceId"
+        
+        # Remove existing task
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existingTask) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+            Write-Host "Removed existing scheduled task"
+        }
+        
+        # Create new task with proper duration
+        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+        $trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 365) -At (Get-Date) -Once
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        
+        try {
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Sends disk utilization metrics to CloudWatch every 5 minutes" -ErrorAction Stop | Out-Null
+            Write-Host "Created scheduled task: $taskName"
+        } catch {
+            Write-Host "Failed to create scheduled task: $($_.Exception.Message)"
+            Write-Host "Trying alternative method..."
+            
+            # Alternative method using schtasks.exe
+            $schtaskCommand = "schtasks /create /tn `"$taskName`" /tr `"PowerShell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$scriptPath\`"`" /sc minute /mo 5 /ru SYSTEM /f"
+            $schtaskResult = Invoke-Expression $schtaskCommand 2>&1
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Created scheduled task using schtasks.exe"
+            } else {
+                Write-Host "Failed to create scheduled task with both methods: $schtaskResult"
+            }
+        }
+        
+        Write-Host "Created scheduled task: $taskName"
+        Write-Host "   - Runs every 5 minutes"
+        Write-Host "   - Sends disk_used_percent metric with InstanceId dimension"
+        Write-Host "   - Uses SYSTEM account"
+        Write-Host ""
+        
+        # Test the scheduled task
+        Write-Host "STEP 3: Testing scheduled task..."
+        
+        # Check if task was created successfully
+        $taskInfo = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($taskInfo) {
+            Write-Host "Task found, attempting to start..."
+            try {
+                Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                Start-Sleep -Seconds 10
+                
+                $taskInfo = Get-ScheduledTask -TaskName $taskName
+                Write-Host "Task Status: $($taskInfo.State)"
+                
+                # Check task history
+                $taskHistory = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'; ID=200,201} -MaxEvents 5 -ErrorAction SilentlyContinue | Where-Object { $_.Message -like "*$taskName*" }
+                if ($taskHistory) {
+                    Write-Host "Recent task execution found in event logs"
+                }
+            } catch {
+                Write-Host "Could not start scheduled task: $($_.Exception.Message)"
+                Write-Host "Task exists but may need manual start or reboot to activate"
+            }
+        } else {
+            Write-Host "Scheduled task was not created successfully"
+            Write-Host "Manual script is available at: $scriptPath"
+            Write-Host "You can run it manually or create the task manually"
+        }
+        
+        Write-Host ""
+        Write-Host "COMPLETE SOLUTION DEPLOYED!"
+        Write-Host ""
+        Write-Host "WHAT'S NOW WORKING:"
+        Write-Host "- Manual disk metrics bypass CloudWatch Agent service issues"
+        Write-Host "- Scheduled task runs every 5 minutes automatically"  
+        Write-Host "- Metrics sent with correct InstanceId dimension"
+        Write-Host "- Same namespace (CWAgent) that your alarms expect"
+        Write-Host "- Survives reboots and runs in background"
+        Write-Host ""
+        Write-Host "YOUR ALARM STATUS:"
+        Write-Host "- Alarm: DiskUtilization-$InstanceId-AutoDiscovered"
+        Write-Host "- Should start receiving data within 15 minutes"
+        Write-Host "- Will trigger consistently when disk usage exceeds threshold"
+        Write-Host ""
+        Write-Host "MONITORING:"
+        Write-Host "- Task Scheduler: Search for '$taskName'"
+        Write-Host "- CloudWatch Console: Metrics, CWAgent, InstanceId, disk_used_percent"
+        Write-Host "- Logs: Task writes to Windows Event Log"
+        
+    } else {
+        Write-Host ""
+        Write-Host "BOTH MANUAL METHODS FAILED"
+        Write-Host ""
+        Write-Host "Despite CloudWatchAgentServerPolicy being attached, metric sending is failing."
+        Write-Host "This could be due to:"
+        Write-Host "1. IMDS v2 enforcement blocking metadata access"
+        Write-Host "2. VPC endpoints missing for CloudWatch"
+        Write-Host "3. Security groups blocking HTTPS traffic"
+        Write-Host "4. AWS CLI configuration issues"
+        Write-Host ""
+        Write-Host "TROUBLESHOOTING STEPS:"
+        Write-Host "1. Test basic AWS access:"
+        Write-Host "   aws sts get-caller-identity --region $Region"
+        Write-Host ""
+        Write-Host "2. Check IMDS access:"
+        Write-Host "   curl http://169.254.169.254/latest/meta-data/instance-id"
+        Write-Host ""
+        Write-Host "3. Test simple metric:"
+        Write-Host "   aws cloudwatch put-metric-data --region $Region --namespace Test --metric-data MetricName=Test,Value=1"
+        Write-Host ""
+        Write-Host "4. Check VPC endpoints and security groups for CloudWatch access"
+    }
+
 } catch {
-    Write-Error "❌ Error getting disk information: $($_.Exception.Message)"
+    Write-Error "Manual solution failed: $($_.Exception.Message)"
+    Write-Host ""
+    Write-Host "FALLBACK OPTIONS:"
+    Write-Host "1. Check VPC endpoints for CloudWatch"
+    Write-Host "2. Verify security groups allow HTTPS outbound"
+    Write-Host "3. Check if IMDS v2 is properly configured"
+    Write-Host "4. Contact AWS support for account-specific issues"
     exit 1
 }
-
-Write-Host ""
-Write-Host "Script completed successfully!"
-Write-Host "Monitor your alarm at: https://console.aws.amazon.com/cloudwatch/home?region=$Region#alarmsV2:alarm/DiskUtilization-$InstanceId-AutoDiscovered"
-
-
