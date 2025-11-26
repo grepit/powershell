@@ -1,7 +1,4 @@
 ## step 1
-.\runit.ps1 -InstanceId "i-01443b4859e997645" -Region "us-east-2"
-
-
 
 
 Invoke-WebRequest -Uri "https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi" -OutFile "$env:TEMP\amazon-cloudwatch-agent.msi"
