@@ -1,7 +1,7 @@
 ## step 1
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-
+# if all fails you can go and download https://amazoncloudwatch-agent.s3.amazonaws.com/windows/amd64/latest/amazon-cloudwatch-agent.msi and double click and run it
 Invoke-WebRequest -Uri "https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi" -OutFile "$env:TEMP\amazon-cloudwatch-agent.msi"
 Start-Process msiexec.exe -ArgumentList "/i $env:TEMP\amazon-cloudwatch-agent.msi /quiet" -Wait
 
