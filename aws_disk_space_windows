@@ -189,9 +189,10 @@ Get-Service AmazonCloudWatchAgent
 Get-Content "C:\ProgramData\Amazon\AmazonCloudWatchAgent\Logs\amazon-cloudwatch-agent.log" -Tail 50
 Get-Content "C:\ProgramData\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent.log" -Tail 50
 
-#step 6
-run this powershell script
-.\fixit.ps1 -InstanceId "i-01443b4859e997645" -Region "us-east-2"
+### step 6
+# copy and paste thie into a notepad in downloads forlder and then runit this way
+#
+# .\fixit.ps1 -InstanceId "i-01443b4859e997645" -Region "us-east-2"
 
 
 # Manual Disk Metrics Solution - Bypass IAM Issues
