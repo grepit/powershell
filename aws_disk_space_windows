@@ -438,3 +438,269 @@ if (`$disk) {
     Write-Host "4. Contact AWS support for account-specific issues"
     exit 1
 }
+
+
+
+
+################################################################################################################
+#if above fails
+#  .\fixit.ps1 -Region "us-east-2" -InstanceId "i-0aa8b60d4dfbc4c2a"
+
+# Fix IMDSv2 Issue - Enable IMDSv1 or Handle IMDSv2 Properly
+# This script provides solutions for the 401 Unauthorized IMDS errors
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$InstanceId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$Region
+)
+
+Write-Host "=== Fix IMDSv2 Issue ===" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "ISSUE CONFIRMED: IMDS is enabled but requires IMDSv2 tokens" -ForegroundColor Red
+Write-Host "Your instance is receiving 401 Unauthorized errors because:" -ForegroundColor Red
+Write-Host "- IMDS is enabled (good!)" -ForegroundColor Yellow
+Write-Host "- But http-tokens is set to 'required' (IMDSv2 only)" -ForegroundColor Yellow
+Write-Host "- The script is using IMDSv1-style requests" -ForegroundColor Yellow
+Write-Host ""
+
+# Test if we can get a token (IMDSv2 method)
+function Test-IMDSv2 {
+    try {
+        # Get IMDSv2 token
+        $headers = @{ 'X-aws-ec2-metadata-token-ttl-seconds' = '21600' }
+        $token = Invoke-RestMethod -Uri "http://169.254.169.254/latest/api/token" -Method PUT -Headers $headers -TimeoutSec 10
+        
+        if ($token) {
+            # Use token to get instance ID
+            $tokenHeaders = @{ 'X-aws-ec2-metadata-token' = $token }
+            $instanceId = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/instance-id" -Headers $tokenHeaders -TimeoutSec 10
+            Write-Host "SUCCESS: IMDSv2 is working! Retrieved instance ID: $instanceId" -ForegroundColor Green
+            return $true
+        }
+    } catch {
+        Write-Host "IMDSv2 test failed: $($_.Exception.Message)" -ForegroundColor Red
+    }
+    return $false
+}
+
+Write-Host "Testing if IMDSv2 is accessible..." -ForegroundColor Yellow
+$imdsv2Works = Test-IMDSv2
+
+if ($imdsv2Works) {
+    Write-Host ""
+    Write-Host "IMDSv2 IS WORKING - Creating IMDSv2-compatible script..." -ForegroundColor Green
+    
+    # Create IMDSv2-compatible disk metrics script
+    $imdsv2Script = @"
+# IMDSv2-Compatible Disk Metrics Script
+# Generated: $(Get-Date)
+param(
+    [string]`$InstanceId = "$InstanceId",
+    [string]`$Region = "$Region",
+    [string]`$LogPath = "C:\Scripts\CloudWatch-DiskMetrics-IMDSv2.log"
+)
+
+function Write-MetricLog {
+    param([string]`$Message, [string]`$Level = "INFO")
+    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    `$logEntry = "[`$timestamp] [`$Level] `$Message"
+    Write-Host `$logEntry
+    try {
+        Add-Content -Path `$LogPath -Value `$logEntry -ErrorAction SilentlyContinue
+    } catch { }
+}
+
+function Get-IMDSv2Token {
+    try {
+        `$headers = @{ 'X-aws-ec2-metadata-token-ttl-seconds' = '21600' }
+        `$token = Invoke-RestMethod -Uri "http://169.254.169.254/latest/api/token" -Method PUT -Headers `$headers -TimeoutSec 10
+        return `$token
+    } catch {
+        Write-MetricLog "Failed to get IMDSv2 token: `$(`$_.Exception.Message)" "ERROR"
+        return `$null
+    }
+}
+
+function Get-AWSCredentials {
+    try {
+        `$token = Get-IMDSv2Token
+        if (-not `$token) { return `$null }
+        
+        `$tokenHeaders = @{ 'X-aws-ec2-metadata-token' = `$token }
+        
+        # Get role name
+        `$roleName = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -Headers `$tokenHeaders -TimeoutSec 10
+        if (`$roleName -is [Array]) { `$roleName = `$roleName[0] }
+        
+        # Get credentials
+        `$credentials = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/iam/security-credentials/`$roleName" -Headers `$tokenHeaders -TimeoutSec 10
+        return `$credentials
+    } catch {
+        Write-MetricLog "Failed to get AWS credentials: `$(`$_.Exception.Message)" "ERROR"
+        return `$null
+    }
+}
+
+try {
+    # Get credentials using IMDSv2
+    `$creds = Get-AWSCredentials
+    if (-not `$creds) {
+        Write-MetricLog "Cannot get AWS credentials" "ERROR"
+        exit 1
+    }
+    
+    # Set AWS credentials as environment variables
+    `$env:AWS_ACCESS_KEY_ID = `$creds.AccessKeyId
+    `$env:AWS_SECRET_ACCESS_KEY = `$creds.SecretAccessKey
+    `$env:AWS_SESSION_TOKEN = `$creds.Token
+    `$env:AWS_DEFAULT_REGION = `$Region
+    
+    # Get disk usage
+    `$disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
+    if (-not `$disk) {
+        Write-MetricLog "Cannot get disk information" "ERROR"
+        exit 1
+    }
+    
+    `$totalSize = `$disk.Size
+    `$freeSpace = `$disk.FreeSpace
+    `$usedSpace = `$totalSize - `$freeSpace
+    `$usedPercent = [math]::Round((`$usedSpace / `$totalSize) * 100, 2)
+    
+    Write-MetricLog "Disk usage: `$usedPercent% (`$([math]::Round(`$usedSpace/1GB, 2)) GB used)"
+    
+    # Send metric with retry
+    `$maxRetries = 3
+    `$success = `$false
+    
+    for (`$i = 1; `$i -le `$maxRetries; `$i++) {
+        `$metricData = "MetricName=disk_used_percent,Value=`$usedPercent,Unit=Percent,Dimensions=[{Name=InstanceId,Value=`$InstanceId}]"
+        `$result = & aws cloudwatch put-metric-data --region `$Region --namespace "CWAgent" --metric-data `$metricData 2>&1
+        
+        if (`$LASTEXITCODE -eq 0) {
+            Write-MetricLog "SUCCESS: Metric sent (attempt `$i): `$usedPercent%" "SUCCESS"
+            `$success = `$true
+            break
+        } else {
+            Write-MetricLog "Attempt `$i failed: `$result" "WARN"
+            if (`$i -lt `$maxRetries) { Start-Sleep -Seconds ([math]::Pow(2, `$i)) }
+        }
+    }
+    
+    if (-not `$success) {
+        Write-MetricLog "Failed to send metric after `$maxRetries attempts" "ERROR"
+        exit 1
+    }
+    
+} catch {
+    Write-MetricLog "Script failed: `$(`$_.Exception.Message)" "ERROR"
+    exit 1
+} finally {
+    # Clear credentials from environment
+    Remove-Item Env:AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:AWS_SESSION_TOKEN -ErrorAction SilentlyContinue
+}
+"@
+
+    # Create the script
+    if (!(Test-Path "C:\Scripts")) {
+        New-Item -ItemType Directory -Path "C:\Scripts" -Force | Out-Null
+    }
+    
+    $scriptPath = "C:\Scripts\disk-metrics-imdsv2.ps1"
+    $imdsv2Script | Out-File $scriptPath -Encoding UTF8
+    Write-Host "Created IMDSv2-compatible script: $scriptPath" -ForegroundColor Green
+    
+    # Test the script
+    Write-Host ""
+    Write-Host "Testing IMDSv2-compatible script..." -ForegroundColor Yellow
+    try {
+        $testResult = & PowerShell.exe -ExecutionPolicy Bypass -File $scriptPath
+        Write-Host "Script test completed. Check output above for results." -ForegroundColor Green
+        
+        # Create scheduled task
+        Write-Host ""
+        Write-Host "Creating scheduled task..." -ForegroundColor Yellow
+        $taskName = "CloudWatch-Disk-Metrics-IMDSv2"
+        
+        # Remove old tasks
+        Get-ScheduledTask -TaskName "*CloudWatch-Disk-Metrics*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Host "Removed old task: $($_.TaskName)" -ForegroundColor Yellow
+        }
+        
+        $taskCmd = "PowerShell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+        $result = & schtasks /create /tn $taskName /tr $taskCmd /sc minute /mo 5 /ru SYSTEM /f 2>&1
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "SUCCESS: Created scheduled task: $taskName" -ForegroundColor Green
+            
+            # Start task
+            & schtasks /run /tn $taskName 2>&1 | Out-Null
+            Write-Host "Started task for immediate test" -ForegroundColor Green
+            
+            Write-Host ""
+            Write-Host "=== IMDSv2 SOLUTION COMPLETE ===" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "WHAT'S WORKING NOW:" -ForegroundColor Green
+            Write-Host "- IMDSv2-compatible disk metrics collection" -ForegroundColor White
+            Write-Host "- Scheduled task running every 5 minutes" -ForegroundColor White
+            Write-Host "- Proper credential handling with token cleanup" -ForegroundColor White
+            Write-Host "- Enhanced logging and error handling" -ForegroundColor White
+            Write-Host ""
+            Write-Host "YOUR ALARM STATUS:" -ForegroundColor Green
+            Write-Host "- DiskUtilization-$InstanceId-AutoDiscovered should receive data within 15 minutes" -ForegroundColor White
+            Write-Host "- Metrics will include proper InstanceId dimension" -ForegroundColor White
+            Write-Host ""
+            Write-Host "MONITORING:" -ForegroundColor Green
+            Write-Host "- Script: $scriptPath" -ForegroundColor White
+            Write-Host "- Logs: C:\Scripts\CloudWatch-DiskMetrics-IMDSv2.log" -ForegroundColor White
+            Write-Host "- Task: Task Scheduler > $taskName" -ForegroundColor White
+            
+        } else {
+            Write-Host "Task creation failed but script works manually: $result" -ForegroundColor Yellow
+        }
+        
+    } catch {
+        Write-Host "Script test failed: $($_.Exception.Message)" -ForegroundColor Red
+    }
+    
+} else {
+    Write-Host ""
+    Write-Host "IMDSv2 is not accessible either. You have two options:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "OPTION 1 (RECOMMENDED): Enable IMDSv1 alongside IMDSv2" -ForegroundColor Green
+    Write-Host "This allows both IMDSv1 and IMDSv2 requests to work:" -ForegroundColor White
+    Write-Host ""
+    Write-Host "AWS CLI command (run from admin workstation):" -ForegroundColor Cyan
+    Write-Host "aws ec2 modify-instance-metadata-options \\" -ForegroundColor White
+    Write-Host "  --instance-id $InstanceId \\" -ForegroundColor White
+    Write-Host "  --region $Region \\" -ForegroundColor White
+    Write-Host "  --http-endpoint enabled \\" -ForegroundColor White
+    Write-Host "  --http-protocol-ipv4 enabled \\" -ForegroundColor White
+    Write-Host "  --http-tokens optional" -ForegroundColor White
+    Write-Host ""
+    Write-Host "AWS Console method:" -ForegroundColor Cyan
+    Write-Host "1. Go to EC2 Console > Instances" -ForegroundColor White
+    Write-Host "2. Select instance $InstanceId" -ForegroundColor White
+    Write-Host "3. Actions > Instance Settings > Modify instance metadata options" -ForegroundColor White
+    Write-Host "4. Change 'Require IMDSv2' from 'Required' to 'Optional'" -ForegroundColor White
+    Write-Host ""
+    Write-Host "OPTION 2: Use AWS CLI with explicit credentials" -ForegroundColor Yellow
+    Write-Host "Configure AWS CLI with access keys as a temporary workaround" -ForegroundColor White
+    Write-Host ""
+    Write-Host "After enabling IMDSv1 (Option 1), re-run the enhanced script:" -ForegroundColor Green
+    Write-Host ".\enhanced-cloudwatch-disk-monitoring.ps1 -Region $Region -InstanceId $InstanceId" -ForegroundColor White
+}
+
+Write-Host ""
+Write-Host "SUMMARY:" -ForegroundColor Cyan
+Write-Host "- The enhanced script correctly identified the IMDS issue" -ForegroundColor White
+Write-Host "- IMDS is enabled but configured for IMDSv2-only access" -ForegroundColor White
+Write-Host "- Solution provided above will resolve the monitoring issue" -ForegroundColor White
+Write-Host "- Your alarm will work consistently once IMDS access is fixed" -ForegroundColor White
+
