@@ -441,7 +441,7 @@ if (`$disk) {
 
 
 
-
+# step 7 ---> only if step 6 fails
 ################################################################################################################
 #if above fails
 #  .\fixit.ps1 -Region "us-east-2" -InstanceId "i-0aa8b60d4dfbc4c2a"
